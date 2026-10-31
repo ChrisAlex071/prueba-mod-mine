@@ -114,8 +114,7 @@ final class CloneChunkLoader {
             claim = new Claim(managed);
             worldClaims.put(key, claim);
             if (!alreadyForced) {
-                ChunkPos pos = new ChunkPos(key);
-                level.setChunkForced(pos.x, pos.z, true);
+                level.setChunkForced((int) key, (int) (key >>> 32), true);
             }
         } else if (restoredOwned) {
             // Un segundo clon puede restaurarse antes que el clon que habia
@@ -135,9 +134,7 @@ final class CloneChunkLoader {
 
         worldClaims.remove(key);
         if (claim.managedByMod) {
-            ChunkPos pos = new ChunkPos(key);
-            level.setChunkForced(pos.x, pos.z, false);
-        }
+            level.setChunkForced((int) key, (int) (key >>> 32), false);
         if (worldClaims.isEmpty()) CLAIMS.remove(level);
     }
 
