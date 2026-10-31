@@ -135,6 +135,7 @@ final class CloneChunkLoader {
         worldClaims.remove(key);
         if (claim.managedByMod) {
             level.setChunkForced((int) key, (int) (key >>> 32), false);
+        }    
         if (worldClaims.isEmpty()) CLAIMS.remove(level);
     }
 
