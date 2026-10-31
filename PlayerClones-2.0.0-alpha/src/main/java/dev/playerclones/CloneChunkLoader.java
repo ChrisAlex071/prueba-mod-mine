@@ -81,7 +81,7 @@ final class CloneChunkLoader {
         Set<Long> desired = new HashSet<>();
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
-                desired.add(ChunkPos.asLong(center.x + dx, center.z + dz));
+                desired.add(new ChunkPos(center.x() + dx, center.z() + dz).toLong());
             }
         }
 
