@@ -83,7 +83,10 @@ public final class CloneWorker {
     public boolean isRemoved() { return clone.isRemoved(); }
     Mannequin body() { return clone; }
     ServerLevel serverLevel() { return (ServerLevel) clone.level(); }
-    ChunkPos chunkPos() { return new ChunkPos(clone.blockPosition()); }
+    ChunkPos chunkPos() {
+    return new ChunkPos(clone.getBlockX() >> 4, clone.getBlockZ() >> 4);
+    }
+
     public boolean hasTask() { return give != null && receive != null; }
 
     // ---------------------------------------------------------------- tarea
