@@ -1,0 +1,84 @@
+# Player Clones — 2.0.0-alpha
+
+Mod de Minecraft Java **26.2** + Fabric. Crea clones con tu skin y asígnales tareas autónomas.
+Versión 2: combina la estructura de comandos/IDs/permisos de la 1.0.0-alpha con la lógica real de trabajo
+(cofres, comercio, movimiento) y persistencia.
+
+> **Alpha sin compilar.** Se escribió sin acceso al repositorio de dependencias de Gradle. Hay que compilarlo
+> localmente y corregir lo que reporte el compilador (ver "Si no compila").
+
+## Qué hace
+
+Tarea `trade <dar> <recibir>`, por ejemplo `iron_ingot` → `emerald`:
+
+1. Busca cofres a ≤16 bloques y toma todo el `<dar>`.
+2. Busca aldeanos a ≤32 bloques que tengan esa oferta (sin segundo ingrediente y con stock) y comercia todo lo posible.
+3. Guarda lo recibido en un cofre con espacio (prefiere el cofre de origen).
+4. Repite. Si no hay trabajo, espera 5 s y reintenta.
+
+Funciona en el servidor, **sin que el jugador esté cerca**, mientras los chunks del clon estén cargados
+(usa `/forceload add` en la zona de trabajo).
+
+## Comandos
+
+`/clone` y `/pclone` son idénticos. Usa `/pclone` si `/clone` te exige permisos de operador
+(el `/clone` de vanilla los exige y Brigadier fusiona ambos comandos).
+
+```mcfunction
+/clone spawn            # 1 clon
+/clone spawn 3          # 3 clones
+/clone list
+/clone 1 info
+/clone 1 task trade iron_ingot emerald
+/clone 2 task trade paper emerald
+/clone 1 stop           # o: /clone 1 task stop
+/clone 1 remove         # suelta lo que llevaba
+```
+
+Máximo 10 clones por jugador. Solo el dueño controla su clon (consola y bloques de comandos pueden con todos).
+No hay override de operador: la API de permisos cambió en 26.x y preferí no depender de ella.
+
+## Cambios respecto a 1.0.0-alpha
+
+- Cuerpo: `Mannequin` con tu skin (antes un aldeano con IA propia que se escapaba y podía comerciar con otros clones).
+- Tarea real implementada (antes solo se guardaba el texto).
+- `spawn [cantidad]`.
+- `/clone list` solo muestra los clones del jugador.
+- **Persistencia:** ID, dueño, tarea y objetos transportados se guardan en tags de la entidad; el clon se
+  re-registra al cargar el chunk. Las IDs duplicadas tras reinicios se reasignan.
+- Autocompletado de items en `task trade`.
+- Build corregido para 26.x (plugin sin remapeo, sin `mappings`, `implementation`).
+- Corregidos errores de compilación: constructor de `CloneRecord` con argumentos de menos y
+  `source.getCommandContext()` (no existe).
+
+## Limitaciones conocidas
+
+- Camina en línea recta y salta obstáculos de 1 bloque; no rodea paredes (si se atasca ~3 s descarta el objetivo).
+- Solo cofres normales y trampa (no barriles); cada mitad de un cofre doble se trata por separado.
+- Los clones en chunks descargados quedan pausados y no salen en `/clone list`.
+- Sin chunk tickets propios.
+
+## Requisitos y compilación
+
+- JDK 25, Minecraft 26.2, Fabric Loader ≥ 0.19.3, Fabric API `0.161.0+26.2`.
+- Gradle 9.5.1 (el wrapper está configurado pero faltan `gradlew` y el jar; genera con `gradle wrapper`).
+
+```bash
+gradle wrapper --gradle-version 9.5.1
+./gradlew build          # Windows: gradlew.bat build
+```
+
+El jar queda en `build/libs/`.
+
+## Si no compila
+
+Los puntos más probables, por renombres en 26.x:
+
+- `Villager` / `Mannequin`: cambia el `import` (p. ej. `net.minecraft.world.entity.npc.villager.Villager`).
+- `Mannequin.setProfile(ResolvableProfile)` y `ResolvableProfile.createResolved(...)`.
+- `level.hasChunkAt(BlockPos)`, `Entity.onGround()`, `Entity.horizontalCollision`.
+- Plugin de Loom: si `1.15.2` no resuelve, prueba `1.17-SNAPSHOT`.
+
+Pega los errores y se ajustan.
+
+Licencia: MIT.
