@@ -92,7 +92,7 @@ final class ClonePatrolEditor {
                 }
                 index++;
             }
-            if (lookingAt >= 0) player.displayClientMessage(
+            if (lookingAt >= 0) player.sendSystemMessage(
                     Component.literal("Punto de patrulla #" + (lookingAt + 1)), true);
         }
     }
