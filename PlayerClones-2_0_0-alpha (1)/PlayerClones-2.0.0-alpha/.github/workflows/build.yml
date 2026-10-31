@@ -5,21 +5,35 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: PlayerClones-2.0.0-alpha
     steps:
       - uses: actions/checkout@v4
+
+      - name: Localizar el proyecto
+        id: find
+        run: |
+          f=$(find . -name settings.gradle -not -path './.git/*' | head -n 1)
+          if [ -z "$f" ]; then
+            echo "No se encontro settings.gradle. Archivos del repositorio:"
+            find . -not -path './.git/*' | head -n 50
+            exit 1
+          fi
+          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
+          echo "Proyecto en: $(dirname "$f")"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '25'
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-          build-root-directory: PlayerClones-2.0.0-alpha
-      - run: gradle build --no-daemon
+
+      - name: Compilar
+        working-directory: ${{ steps.find.outputs.dir }}
+        run: gradle build --no-daemon
+
       - uses: actions/upload-artifact@v4
         with:
           name: player-clones-jar
-          path: PlayerClones-2.0.0-alpha/build/libs/*.jar
+          path: ${{ steps.find.outputs.dir }}/build/libs/*.jar
