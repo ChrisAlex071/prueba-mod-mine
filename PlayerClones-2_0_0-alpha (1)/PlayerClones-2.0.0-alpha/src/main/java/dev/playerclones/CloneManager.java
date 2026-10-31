@@ -1,6 +1,8 @@
 package dev.playerclones;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -13,6 +15,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.decoration.Mannequin;
+import net.minecraft.world.phys.AABB;
 
 /** Registro de clones cargados. Los clones en chunks descargados quedan pausados. */
 public final class CloneManager {
@@ -53,11 +56,18 @@ public final class CloneManager {
         return ownedBy(owner).size();
     }
 
+    private static boolean isRegistered(Entity e) {
+        for (CloneWorker w : CLONES.values()) {
+            if (w.uuid().equals(e.getUUID())) return true;
+        }
+        return false;
+    }
+
     // ------------------------------------------------------------------ ciclo
 
     /**
-     * Crea los clones con el comando /summon (asi no dependemos de nombres internos de la API).
-     * La entidad se registra sola en PlayerClones (ENTITY_LOAD) gracias a los tags.
+     * Crea los clones con /summon (asi no dependemos de nombres internos de la API) y luego
+     * localiza la entidad recien creada para registrarla directamente.
      */
     public static List<CloneWorker> spawn(ServerPlayer owner, int amount) {
         ServerLevel level = (ServerLevel) owner.level();
@@ -87,10 +97,29 @@ public final class CloneManager {
 
             server.getCommands().performPrefixedCommand(source, command);
 
+            // Puede que el evento ENTITY_LOAD ya lo haya registrado...
             CloneWorker worker = CLONES.get(id);
+            if (worker == null) {
+                // ...si no, buscamos la entidad recien creada en el punto exacto y la adoptamos.
+                AABB box = new AABB(x - 0.3, y - 0.5, z - 0.3, x + 0.3, y + 1.0, z + 0.3);
+                for (Mannequin m : level.getEntitiesOfClass(Mannequin.class, box)) {
+                    if (isRegistered(m)) continue;
+                    worker = adopt(m, id, owner.getUUID());
+                    break;
+                }
+            }
             if (worker != null) out.add(worker);
         }
         return out;
+    }
+
+    private static CloneWorker adopt(Mannequin body, int id, UUID owner) {
+        setTag(body, TAG_ID, String.valueOf(id));
+        setTag(body, TAG_OWNER, owner.toString());
+        nextId = Math.max(nextId, id + 1);
+        CloneWorker worker = new CloneWorker(id, owner, body);
+        CLONES.put(id, worker);
+        return worker;
     }
 
     public static void remove(CloneWorker worker) {
@@ -99,7 +128,7 @@ public final class CloneManager {
         worker.discard();
     }
 
-    /** Se llama al cargar la entidad (o al crearla). Idempotente. */
+    /** Se llama al cargar la entidad (p. ej. tras reiniciar el mundo). Idempotente. */
     static CloneWorker register(Mannequin body) {
         for (CloneWorker w : CLONES.values()) {
             if (w.uuid().equals(body.getUUID())) return w;
@@ -139,17 +168,52 @@ public final class CloneManager {
 
     // ------------------------------------------------------------- tags helper
 
-    /** Lee los tags de la entidad; el metodo se llama distinto segun la version, asi que probamos ambos. */
-    @SuppressWarnings("unchecked")
-    private static Set<String> tagsOf(Entity e) {
-        for (String name : new String[] {"entityTags", "getTags"}) {
+    private static Method tagsMethod;
+    private static boolean tagsProbed;
+
+    /**
+     * El metodo que devuelve los tags de Entity cambio de nombre en 26.x. En vez de adivinarlo,
+     * ponemos un tag de prueba y buscamos cual metodo sin argumentos que devuelve un Set lo contiene.
+     */
+    private static void probeTagsMethod(Entity e) {
+        tagsProbed = true;
+        String probe = "playerclones:probe";
+        e.addTag(probe);
+        for (Method m : Entity.class.getDeclaredMethods()) {
+            if (m.getParameterCount() != 0 || !Set.class.isAssignableFrom(m.getReturnType())) continue;
             try {
-                return (Set<String>) Entity.class.getMethod(name).invoke(e);
-            } catch (ReflectiveOperationException | ClassCastException ignored) {
-                // probar el siguiente nombre
+                m.setAccessible(true);
+                Object r = m.invoke(e);
+                if (r instanceof Set<?> s && s.contains(probe)) {
+                    tagsMethod = m;
+                    break;
+                }
+            } catch (ReflectiveOperationException | RuntimeException ignored) {
+                // probar el siguiente
             }
         }
-        return Set.of();
+        e.removeTag(probe);
+        if (tagsMethod == null) {
+            System.err.println("[PlayerClones] No se encontro el metodo de tags de Entity; "
+                    + "los clones no se recuperaran tras reiniciar.");
+        }
+    }
+
+    private static Set<String> tagsOf(Entity e) {
+        if (!tagsProbed) probeTagsMethod(e);
+        Set<String> out = new HashSet<>();
+        if (tagsMethod == null) return out;
+        try {
+            Object r = tagsMethod.invoke(e);
+            if (r instanceof Set<?> s) {
+                for (Object o : s) {
+                    if (o instanceof String str) out.add(str);
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // devolver lo que haya
+        }
+        return out;
     }
 
     static String getTag(Entity e, String prefix) {
