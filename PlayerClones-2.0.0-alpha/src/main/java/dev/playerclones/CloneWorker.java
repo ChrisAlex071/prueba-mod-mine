@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
@@ -134,13 +135,17 @@ public final class CloneWorker {
         ignoredVillagers.clear();
     }
 
-    public boolean hasTask() { return give != null && receive != null; }
+    public boolean hasTask() { return hasTradeTask() || isSorting(); }
+    private boolean hasTradeTask() { return give != null && receive != null; }
+    private boolean isSorting() { return sortCenter != null; }
 
     // ---------------------------------------------------------------- tarea
 
     public void assign(Item give, Item receive) {
         this.give = give;
         this.receive = receive;
+        this.sortCenter = null;
+        this.sortMove = null;
         resetPatrol();
         this.targetChest = null;
         this.targetVillager = null;
@@ -155,6 +160,8 @@ public final class CloneWorker {
     public void clearTask() {
         give = null;
         receive = null;
+        sortCenter = null;
+        sortMove = null;
         targetChest = null;
         targetVillager = null;
         resetPatrol();
@@ -164,19 +171,27 @@ public final class CloneWorker {
     }
 
     public String describeTask() {
-        return hasTask()
+        if (isSorting()) return "ordenar cofres (radio " + sortRadius + ")";
+        return hasTradeTask()
                 ? "trade " + ItemLookup.shortName(give) + " -> " + ItemLookup.shortName(receive)
                 : "sin tarea";
     }
 
     public String describeFull() {
         Vec3 p = clone.position();
+        if (isSorting()) {
+            return "tarea: ordenar cofres (centro " + sortCenter.getX() + " " + sortCenter.getY() + " "
+                    + sortCenter.getZ() + ", radio " + sortRadius + ")"
+                    + " | estado: " + sortState.name()
+                    + " | items movidos: " + sortMovedTotal
+                    + String.format(" | pos: %.0f %.0f %.0f", p.x, p.y, p.z);
+        }
         String carry = "";
         if (give != null && carriedGive > 0) carry += carriedGive + "x " + ItemLookup.shortName(give) + " ";
         if (receive != null && carriedReceive > 0) carry += carriedReceive + "x " + ItemLookup.shortName(receive);
         return "tarea: " + describeTask()
                 + " | puntos: " + route.size()
-                + " | estado: " + (hasTask() ? state.name() : "IDLE")
+                + " | estado: " + (hasTradeTask() ? state.name() : "IDLE")
                 + " | lleva: " + (carry.isBlank() ? "nada" : carry.trim())
                 + String.format(" | pos: %.0f %.0f %.0f", p.x, p.y, p.z);
     }
@@ -212,6 +227,14 @@ public final class CloneWorker {
                 sourceChest = new BlockPos(Integer.parseInt(xyz[0]), Integer.parseInt(xyz[1]), Integer.parseInt(xyz[2]));
             } catch (NumberFormatException ignored) { }
         }
+        String savedSort = CloneManager.getTag(clone, "playerclones:sort=");
+        if (savedSort != null) {
+            String[] v = savedSort.split(",");
+            if (v.length == 4) try {
+                sortCenter = new BlockPos(Integer.parseInt(v[0]), Integer.parseInt(v[1]), Integer.parseInt(v[2]));
+                sortRadius = Math.max(4, Math.min(24, Integer.parseInt(v[3])));
+            } catch (NumberFormatException ignored) { }
+        }
         String savedRoute = CloneManager.getTag(clone, CloneManager.TAG_ROUTE);
         if (savedRoute != null) {
             for (String entry : savedRoute.split(";")) {
@@ -228,6 +251,8 @@ public final class CloneWorker {
     private void saveState() {
         CloneManager.setTag(clone, "playerclones:source=", sourceChest == null ? null :
                 sourceChest.getX() + "," + sourceChest.getY() + "," + sourceChest.getZ());
+        CloneManager.setTag(clone, "playerclones:sort=", sortCenter == null ? null :
+                sortCenter.getX() + "," + sortCenter.getY() + "," + sortCenter.getZ() + "," + sortRadius);
         CloneManager.setTag(clone, CloneManager.TAG_GIVE, give == null ? null : ItemLookup.fullName(give));
         CloneManager.setTag(clone, CloneManager.TAG_RECEIVE, receive == null ? null : ItemLookup.fullName(receive));
         CloneManager.setTag(clone, CloneManager.TAG_CARRY_GIVE, carriedGive > 0 ? String.valueOf(carriedGive) : null);
@@ -261,7 +286,9 @@ public final class CloneWorker {
         movedThisTick = false;
         clone.setDeltaMovement(Vec3.ZERO);
 
-        if (hasTask()) {
+        if (isSorting()) {
+            sortTick();
+        } else if (hasTradeTask()) {
             if (hasRoute()) {
                 patrolTick();
             } else if (cooldown > 0) {
@@ -682,6 +709,149 @@ public final class CloneWorker {
         }
         c.setChanged();
         return amount;
+    }
+
+    // ----------------------------------------------------------- ordenar cofres
+
+    private enum SortState { PLAN, TO_SOURCE, TO_DEST }
+
+    private BlockPos sortCenter;
+    private int sortRadius = 16;
+    private SortState sortState = SortState.PLAN;
+    private CloneSorter.Move sortMove;
+    private final Set<String> sortBlocked = new HashSet<>();
+    private int sortMovedTotal;
+    private int sortIdleCycles;
+    private boolean sortWorking;
+    private boolean sortIdleReported;
+
+    /** Asigna la tarea de ordenar los cofres alrededor de la posicion actual del clon. */
+    public void assignSort(int radius) {
+        dropCarried(); // si venia de un trueque, suelta lo que llevaba
+        give = null;
+        receive = null;
+        resetPatrol();
+        targetChest = null;
+        targetVillager = null;
+        sortCenter = clone.blockPosition();
+        sortRadius = Math.max(4, Math.min(24, radius));
+        sortState = SortState.PLAN;
+        sortMove = null;
+        sortBlocked.clear();
+        sortMovedTotal = 0;
+        sortIdleCycles = 0;
+        sortWorking = false;
+        sortIdleReported = false;
+        cooldown = 0;
+        clone.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+        saveState();
+        CloneChunkLoader.refresh(this);
+    }
+
+    private void sortTick() {
+        if (cooldown > 0) {
+            cooldown--;
+            return;
+        }
+        switch (sortState) {
+            case PLAN -> sortPlan();
+            case TO_SOURCE -> sortToSource();
+            case TO_DEST -> sortToDest();
+        }
+    }
+
+    private void sortPlan() {
+        List<CloneSorter.Group> groups = CloneSorter.scan(level(), sortCenter, sortRadius);
+        CloneSorter.Move move = CloneSorter.plan(level(), groups, clone.position(), sortBlocked);
+        if (move == null) {
+            if (sortWorking) {
+                sortWorking = false;
+                tell("Termine de ordenar los cofres (" + sortMovedTotal + " items movidos).");
+            } else if (!sortIdleReported) {
+                tell("No hay nada que ordenar (hacen falta 2 o mas cofres, items repartidos y espacio).");
+            }
+            sortIdleReported = true;
+            if (++sortIdleCycles % 12 == 0) sortBlocked.clear(); // reintentar bloqueados cada ~1 min
+            cooldown = 100;
+            return;
+        }
+        sortIdleReported = false;
+        sortWorking = true;
+        sortMove = move;
+        sortState = SortState.TO_SOURCE;
+        resetNavigation();
+    }
+
+    private void sortToSource() {
+        CloneSorter.Move m = sortMove;
+        if (m == null || !CloneSorter.hasAny(level(), m.source(), m.items())) {
+            sortMove = null;
+            sortState = SortState.PLAN; // alguien vacio el cofre mientras tanto
+            return;
+        }
+        BlockPos target = m.source().nearestPart(clone.position());
+        switch (walkToNavigated(Vec3.atBottomCenterOf(target))) {
+            case ARRIVED -> {
+                clone.swing(InteractionHand.MAIN_HAND);
+                clone.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(m.items().get(0)));
+                sortState = SortState.TO_DEST;
+                resetNavigation();
+                cooldown = 10;
+            }
+            case STUCK -> {
+                sortBlocked.add(m.key());
+                sortMove = null;
+                sortState = SortState.PLAN;
+                resetNavigation();
+            }
+            default -> { }
+        }
+    }
+
+    private void sortToDest() {
+        CloneSorter.Move m = sortMove;
+        if (m == null) {
+            sortState = SortState.PLAN;
+            return;
+        }
+        BlockPos target = m.dest().nearestPart(clone.position());
+        switch (walkToNavigated(Vec3.atBottomCenterOf(target))) {
+            case ARRIVED -> {
+                // El traspaso se hace de golpe al llegar: no hay items "en transito" que se puedan perder.
+                Map<Item, Integer> moved = CloneSorter.transfer(level(), m.source(), m.dest(), m.items());
+                clone.swing(InteractionHand.MAIN_HAND);
+                clone.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+                int total = 0;
+                StringBuilder text = new StringBuilder();
+                int shown = 0;
+                for (Map.Entry<Item, Integer> e : moved.entrySet()) {
+                    total += e.getValue();
+                    if (shown++ < 3) {
+                        if (!text.isEmpty()) text.append(", ");
+                        text.append(e.getValue()).append("x ").append(ItemLookup.shortName(e.getKey()));
+                    }
+                }
+                if (moved.size() > 3) text.append(", ...");
+                if (total == 0) {
+                    sortBlocked.add(m.key());
+                } else {
+                    sortMovedTotal += total;
+                    tell("Movi " + text + ".");
+                }
+                sortMove = null;
+                sortState = SortState.PLAN;
+                resetNavigation();
+                cooldown = 10;
+            }
+            case STUCK -> {
+                sortBlocked.add(m.key());
+                sortMove = null;
+                sortState = SortState.PLAN;
+                clone.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+                resetNavigation();
+            }
+            default -> { }
+        }
     }
 
     // ------------------------------------------------------------- movimiento
