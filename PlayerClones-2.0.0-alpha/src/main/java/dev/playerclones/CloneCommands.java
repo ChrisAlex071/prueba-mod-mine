@@ -24,6 +24,7 @@ import net.minecraft.world.item.Item;
  * /clone <id> info | stop | remove
  * /clone <id> task stop
  * /clone <id> task trade <dar> <recibir>
+ * /clone <id> task sort [radio]
  *
  * Se registra tambien como /pclone: el /clone de vanilla exige permisos de operador y
  * Brigadier fusiona ambos nodos, asi que /pclone funciona siempre (p. ej. sin cheats).
@@ -50,6 +51,11 @@ public final class CloneCommands {
                         .then(Commands.literal("remove").executes(ctx -> remove(ctx.getSource(), id(ctx))))
                         .then(Commands.literal("task")
                                 .then(Commands.literal("stop").executes(ctx -> stop(ctx.getSource(), id(ctx))))
+                                .then(Commands.literal("sort")
+                                        .executes(ctx -> sort(ctx.getSource(), id(ctx), 16))
+                                        .then(Commands.argument("radius", IntegerArgumentType.integer(4, 24))
+                                                .executes(ctx -> sort(ctx.getSource(), id(ctx),
+                                                        IntegerArgumentType.getInteger(ctx, "radius")))))
                                 .then(Commands.literal("trade")
                                         .then(Commands.argument("give", StringArgumentType.word())
                                                 .suggests(CloneCommands::suggestItems)
@@ -133,6 +139,16 @@ public final class CloneCommands {
         src.sendSuccess(() -> Component.literal("Clon #" + id + ": sacara " + ItemLookup.shortName(give)
                 + " de cofres cercanos, lo cambiara por " + ItemLookup.shortName(receive)
                 + " con aldeanos y guardara el resultado en un cofre."), false);
+        return 1;
+    }
+
+    private static int sort(CommandSourceStack src, int id, int radius) {
+        CloneWorker w = owned(src, id);
+        if (w == null) return 0;
+        w.assignSort(radius);
+        src.sendSuccess(() -> Component.literal("Clon #" + id + ": ordenara los cofres a " + radius
+                + " bloques a la redonda de donde esta ahora. Un cofre por tipo de item: mueve cada item "
+                + "al cofre que ya tiene mas cantidad de el."), false);
         return 1;
     }
 
