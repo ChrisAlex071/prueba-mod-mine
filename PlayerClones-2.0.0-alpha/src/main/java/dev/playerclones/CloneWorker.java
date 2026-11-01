@@ -38,9 +38,9 @@ public final class CloneWorker {
     private enum State { SEARCH, TO_CHEST, TO_VILLAGER, DEPOSIT, PATROL, RETURN_HOME }
     private enum Walk { MOVING, ARRIVED, STUCK }
 
-    private static final int CHEST_RADIUS = 16;
+    private static final int CHEST_RADIUS = 32;
     private static final int CHEST_HEIGHT = 6;
-    private static final int VILLAGER_RADIUS = 32;
+    private static final int VILLAGER_RADIUS = 64;
     private static final int PATROL_VILLAGER_RADIUS = 6;
     private static final double SPEED = 0.2;   // bloques/tick (~caminar)
     private static final double REACH = 2.5;   // distancia para interactuar
