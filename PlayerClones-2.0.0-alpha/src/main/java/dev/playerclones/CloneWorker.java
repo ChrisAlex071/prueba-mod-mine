@@ -79,6 +79,9 @@ public final class CloneWorker {
     private int navigationStep;
     private int navigationBlockedTicks;
     private int navigationRetryDelay;
+    private boolean navigationPlanned;
+    private int navigationFailures;
+    private final Set<BlockPos> openedDoors = new HashSet<>();
 
     CloneWorker(int id, UUID owner, Mannequin clone) {
         this.id = id;
@@ -273,6 +276,7 @@ public final class CloneWorker {
                 }
             }
         }
+        closeDoorsBehind();
         if (!movedThisTick) move(0, 0); // mantener fisica aunque este quieto
     }
 
@@ -420,8 +424,7 @@ public final class CloneWorker {
             state = State.SEARCH;
             return;
         }
-        switch (hasRoute() ? walkToNavigated(Vec3.atBottomCenterOf(targetChest))
-                : walkTo(Vec3.atBottomCenterOf(targetChest))) {
+        switch (walkToNavigated(Vec3.atBottomCenterOf(targetChest))) {
             case ARRIVED -> {
                 int taken = takeAll(c, give);
                 carriedGive += taken;
@@ -447,8 +450,7 @@ public final class CloneWorker {
             state = hasRoute() ? State.PATROL : State.SEARCH;
             return;
         }
-        switch (hasRoute() ? walkToNavigated(targetVillager.position())
-                : walkTo(targetVillager.position())) {
+        switch (walkToNavigated(targetVillager.position())) {
             case ARRIVED -> {
                 int trades = trade(targetVillager);
                 if (hasRoute() || trades == 0) ignoredVillagers.add(targetVillager.getUUID());
@@ -474,8 +476,7 @@ public final class CloneWorker {
                 return;
             }
         }
-        switch (hasRoute() ? walkToNavigated(Vec3.atBottomCenterOf(targetChest))
-                : walkTo(Vec3.atBottomCenterOf(targetChest))) {
+        switch (walkToNavigated(Vec3.atBottomCenterOf(targetChest))) {
             case ARRIVED -> {
                 Container c = containerAt(targetChest);
                 int before = carriedReceive;
@@ -657,63 +658,122 @@ public final class CloneWorker {
         navigationStep = 0;
         navigationBlockedTicks = 0;
         navigationRetryDelay = 0;
+        navigationPlanned = false;
+        navigationFailures = 0;
     }
 
-    /** Intenta movimiento normal; si se atasca, calcula un rodeo entre los puntos. */
+    /**
+     * Camina hasta el objetivo planificando el camino con A* desde el principio (rodea paredes,
+     * sube/baja desniveles y abre puertas). Si no hay camino, se acerca en linea recta y, si sigue
+     * sin avanzar, devuelve STUCK para que el objetivo se descarte.
+     */
     private Walk walkToNavigated(Vec3 target) {
-        if (navigationTarget == null || navigationTarget.distanceToSqr(target) > 1.0) {
-            resetNavigation();
-            navigationTarget = target;
-        }
-
         Vec3 current = clone.position();
-        if (current.distanceToSqr(target) <= REACH * REACH
-                && Math.abs(current.y - target.y) < 3) {
+        if (current.distanceToSqr(target) <= REACH * REACH && Math.abs(current.y - target.y) < 3) {
             resetNavigation();
             return Walk.ARRIVED;
         }
 
-        if (!navigationPath.isEmpty()) {
-            while (navigationStep < navigationPath.size()) {
-                Vec3 step = navigationPath.get(navigationStep);
-                if (clone.position().distanceToSqr(step) < .65 * .65) {
-                    navigationStep++;
-                    continue;
-                }
-                Walk result = walkToRaw(step, .55);
-                if (result == Walk.STUCK) {
-                    navigationPath = List.of();
-                    navigationStep = 0;
-                    navigationBlockedTicks = 12;
-                    navigationRetryDelay = 0;
-                }
-                return Walk.MOVING;
-            }
-            navigationPath = List.of();
+        // Objetivo nuevo (otro cofre/aldeano/punto) o que se movio mucho: planificar de nuevo.
+        if (navigationTarget == null || navigationTarget.distanceToSqr(target) > 2.25) {
+            if (navigationTarget == null || navigationTarget.distanceToSqr(target) > 16.0) resetNavigation();
+            navigationTarget = target;
+            navigationPlanned = false;
+        }
+        if (navigationRetryDelay > 0) navigationRetryDelay--;
+
+        if (!navigationPlanned && navigationRetryDelay == 0) {
+            navigationPath = ClonePathfinder.find(level(), current, target);
             navigationStep = 0;
+            navigationPlanned = true;
+            navigationBlockedTicks = 0;
+            navigationRetryDelay = 10; // como mucho 2 calculos por segundo
         }
 
+        // Seguir el camino calculado
+        while (navigationStep < navigationPath.size()) {
+            Vec3 step = navigationPath.get(navigationStep);
+            Vec3 now = clone.position();
+            double hx = now.x - step.x;
+            double hz = now.z - step.z;
+            if (now.distanceToSqr(step) < .65 * .65 || (hx * hx + hz * hz < .3 * .3 && now.y > step.y)) {
+                navigationStep++; // llego a este punto (o lo esta sobrevolando en una caida)
+                continue;
+            }
+            openDoorsAround(step);
+            Walk result = walkToRaw(step, .55);
+            if (result == Walk.ARRIVED) {
+                navigationStep++;
+                continue;
+            }
+            if (result == Walk.STUCK) {
+                // Algo bloquea este tramo: recalcular desde donde esta.
+                navigationPath = List.of();
+                navigationStep = 0;
+                navigationPlanned = false;
+                navigationRetryDelay = 0;
+                if (++navigationFailures >= 4) {
+                    resetNavigation();
+                    return Walk.STUCK;
+                }
+            }
+            return Walk.MOVING;
+        }
+        navigationPath = List.of();
+        navigationStep = 0;
+
+        // Sin camino (o ya recorrido): acercarse en linea recta.
         Vec3 before = clone.position();
         Walk direct = walkToRaw(target, REACH);
         if (direct == Walk.ARRIVED) {
             resetNavigation();
             return direct;
         }
-        if (direct == Walk.STUCK ||
-                Math.pow(clone.getX() - before.x, 2) + Math.pow(clone.getZ() - before.z, 2) < .0004) {
-            navigationBlockedTicks++;
-        } else {
+        boolean noProgress = direct == Walk.STUCK
+                || Math.pow(clone.getX() - before.x, 2) + Math.pow(clone.getZ() - before.z, 2) < .0004;
+        navigationBlockedTicks = noProgress ? navigationBlockedTicks + 1 : 0;
+        if (navigationBlockedTicks >= 12 && navigationRetryDelay == 0) {
+            navigationPlanned = false; // replanificar desde la posicion actual
             navigationBlockedTicks = 0;
         }
-        if (navigationRetryDelay > 0) navigationRetryDelay--;
-        if (navigationBlockedTicks >= 12 && navigationRetryDelay == 0) {
-            navigationPath = ClonePathfinder.find(level(), clone.position(), target);
-            navigationStep = 0;
-            navigationBlockedTicks = 0;
-            navigationRetryDelay = 40;
-            if (navigationPath.isEmpty() && direct == Walk.STUCK) return Walk.STUCK;
+        if (direct == Walk.STUCK) {
+            resetNavigation();
+            return Walk.STUCK;
         }
         return Walk.MOVING;
+    }
+
+    /** Abre las puertas/portones en el camino inmediato del clon. */
+    private void openDoorsAround(Vec3 step) {
+        ServerLevel w = level();
+        BlockPos s = BlockPos.containing(step);
+        BlockPos me = clone.blockPosition();
+        List<BlockPos> cells = new ArrayList<>(List.of(s, s.above(), me, me.above()));
+        if (navigationStep + 1 < navigationPath.size()) {
+            BlockPos n = BlockPos.containing(navigationPath.get(navigationStep + 1));
+            cells.add(n);
+            cells.add(n.above());
+        }
+        for (BlockPos c : cells) {
+            BlockPos opened = ClonePathfinder.openDoor(w, c);
+            if (opened != null) openedDoors.add(opened);
+        }
+    }
+
+    /** Cierra las puertas que el clon abrio cuando ya se alejo. */
+    private void closeDoorsBehind() {
+        if (openedDoors.isEmpty() || clone.tickCount % 10 != 0) return;
+        Vec3 p = clone.position();
+        var it = openedDoors.iterator();
+        while (it.hasNext()) {
+            BlockPos d = it.next();
+            double dx = p.x - (d.getX() + .5);
+            double dz = p.z - (d.getZ() + .5);
+            if (dx * dx + dz * dz > 9.0 || Math.abs(p.y - d.getY()) > 4) {
+                ClonePathfinder.closeDoor(level(), d);
+                it.remove();
+            }
+        }
     }
 
     private Walk walkTo(Vec3 target) {
