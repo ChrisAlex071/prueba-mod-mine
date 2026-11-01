@@ -518,12 +518,18 @@ public final class CloneWorker {
         for (Villager v : level().getEntitiesOfClass(Villager.class,
                 clone.getBoundingBox().inflate(radius), e -> e.isAlive())) {
             if (ignoredVillagers.contains(v.getUUID())) continue;
+            if (v.getTradingPlayer() != null) continue; // un jugador esta comerciando con el
             boolean usable = false;
-            for (MerchantOffer o : v.getOffers()) {
-                if (isWantedOffer(o) && !o.isOutOfStock() && carriedGive >= o.getCostA().getCount()) {
-                    usable = true;
-                    break;
+            applyOwnerPrices(v); // con el descuento del dueño, el hierro necesario puede ser menor
+            try {
+                for (MerchantOffer o : v.getOffers()) {
+                    if (isWantedOffer(o) && !o.isOutOfStock() && carriedGive >= o.getCostA().getCount()) {
+                        usable = true;
+                        break;
+                    }
                 }
+            } finally {
+                clearSpecialPrices(v);
             }
             if (!usable) continue;
             double d = v.distanceToSqr(clone);
@@ -536,30 +542,58 @@ public final class CloneWorker {
     }
 
     private int trade(Villager v) {
+        if (v.getTradingPlayer() != null) return 0; // un jugador esta comerciando con el
         int trades = 0;
         int spent = 0;
         int gained = 0;
-        for (MerchantOffer offer : v.getOffers()) {
-            if (!isWantedOffer(offer)) continue;
-            while (!offer.isOutOfStock() && carriedGive >= Math.max(1, offer.getCostA().getCount())) {
-                int cost = Math.max(1, offer.getCostA().getCount());
-                int result = offer.getResult().getCount();
-                carriedGive -= cost;
-                carriedReceive += result;
-                spent += cost;
-                gained += result;
-                v.notifyTrade(offer); // gasta un uso, da XP al aldeano, etc.
-                trades++;
+        int reputation = applyOwnerPrices(v);
+        try {
+            for (MerchantOffer offer : v.getOffers()) {
+                if (!isWantedOffer(offer)) continue;
+                while (!offer.isOutOfStock() && carriedGive >= Math.max(1, offer.getCostA().getCount())) {
+                    int cost = Math.max(1, offer.getCostA().getCount()); // ya incluye el descuento del dueño
+                    int result = offer.getResult().getCount();
+                    carriedGive -= cost;
+                    carriedReceive += result;
+                    spent += cost;
+                    gained += result;
+                    v.notifyTrade(offer); // gasta un uso, da XP al aldeano, etc.
+                    trades++;
+                }
             }
+        } finally {
+            clearSpecialPrices(v);
         }
         clone.swing(InteractionHand.MAIN_HAND);
         if (trades > 0) {
             clone.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(receive));
             saveState();
             tell("Cambie " + spent + "x " + ItemLookup.shortName(give)
-                    + " por " + gained + "x " + ItemLookup.shortName(receive) + ".");
+                    + " por " + gained + "x " + ItemLookup.shortName(receive)
+                    + (reputation > 0 ? " (con tu descuento de reputacion)." : "."));
         }
         return trades;
+    }
+
+    /**
+     * Aplica a las ofertas del aldeano el descuento que le corresponde al DUEÑO del clon
+     * (p. ej. por haberlo curado de zombi), con la misma formula de vanilla. Se guarda por UUID
+     * en la memoria del aldeano, asi que funciona aunque el dueño este desconectado.
+     * Devuelve la reputacion del dueño con ese aldeano.
+     */
+    private int applyOwnerPrices(Villager v) {
+        clearSpecialPrices(v); // partir de precios limpios (el descuento se suma)
+        int reputation = v.getGossips().getReputation(owner, g -> true);
+        if (reputation != 0) {
+            for (MerchantOffer o : v.getOffers()) {
+                o.addToSpecialPriceDiff(-Mth.floor((float) reputation * o.getPriceMultiplier()));
+            }
+        }
+        return reputation;
+    }
+
+    private void clearSpecialPrices(Villager v) {
+        for (MerchantOffer o : v.getOffers()) o.resetSpecialPriceDiff();
     }
 
     // ----------------------------------------------------------------- cofres
