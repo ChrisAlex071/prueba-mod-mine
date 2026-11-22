@@ -41,7 +41,7 @@ public final class CloneWorker {
     private enum Walk { MOVING, ARRIVED, STUCK }
 
     private static final int CHEST_RADIUS = 16;
-    private static final int CHEST_HEIGHT = 6;
+    private static final int CHEST_HEIGHT = 15; // altura de busqueda de cofres (arriba y abajo)
     private static final int VILLAGER_RADIUS = 32;
     private static final int PATROL_VILLAGER_RADIUS = 6;
     private static final double SPEED = 0.2;   // bloques/tick (~caminar)

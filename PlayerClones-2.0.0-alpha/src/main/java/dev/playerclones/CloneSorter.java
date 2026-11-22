@@ -32,7 +32,7 @@ import net.minecraft.world.phys.Vec3;
  *  - Los traspasos conservan los datos de cada pila (encantamientos, nombre, durabilidad, etc.).
  */
 final class CloneSorter {
-    private static final int HEIGHT = 6;
+    private static final int HEIGHT = 15; // altura de busqueda de cofres (arriba y abajo)
 
     static final class Group {
         final BlockPos anchor;

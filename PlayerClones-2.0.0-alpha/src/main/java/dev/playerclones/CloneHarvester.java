@@ -26,8 +26,10 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
  * bayas dulces y melones/calabazas unidos a un tallo.
  */
 final class CloneHarvester {
-    /** Altura escaneada por encima y por debajo del centro. */
+    /** Altura a la que se buscan cultivos, por encima y por debajo del centro. */
     static final int VERTICAL = 8;
+    /** Altura a la que se buscan cofres, por encima y por debajo del centro. */
+    static final int CHEST_VERTICAL = 15;
 
     private CloneHarvester() { }
 
@@ -142,12 +144,12 @@ final class CloneHarvester {
                 int x = center.getX() + dx;
                 int z = center.getZ() + dz;
                 if (!level.hasChunkAt(m.set(x, center.getY(), z))) continue; // chunk descargado: no se ve
-                budget -= 2 * VERTICAL + 1;
-                for (int y = center.getY() - VERTICAL; y <= center.getY() + VERTICAL; y++) {
+                budget -= 2 * CHEST_VERTICAL + 1;
+                for (int y = center.getY() - CHEST_VERTICAL; y <= center.getY() + CHEST_VERTICAL; y++) {
                     m.set(x, y, z);
                     BlockState s = level.getBlockState(m);
                     if (s.isAir()) continue;
-                    if (isMature(level, m, s)) {
+                    if (Math.abs(y - center.getY()) <= VERTICAL && isMature(level, m, s)) {
                         crops.add(m.immutable());
                     } else if (s.getBlock() instanceof ChestBlock) {
                         chests.add(m.immutable());
