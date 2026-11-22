@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.Blocks;
@@ -17,6 +18,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 /**
  * Navegador A* para el clon (version 2).
@@ -65,7 +67,7 @@ final class ClonePathfinder {
         while (!open.isEmpty() && visited++ < MAX_VISITED) {
             BlockPos cur = open.poll().pos();
             if (!closed.add(cur)) continue;
-            if (isGoal(cur, destination)) return build(cur, origin, parent);
+            if (isGoal(cur, destination)) return build(world, cur, origin, parent);
 
             double h = heuristic(cur, destination);
             if (h < bestH) {
@@ -74,6 +76,7 @@ final class ClonePathfinder {
             }
 
             double base = cost.get(cur);
+            double curTop = standTop(world, cur); // altura real del suelo donde esta parado
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     if (dx == 0 && dz == 0) continue;
@@ -101,7 +104,10 @@ final class ClonePathfinder {
                     }
                     // Subir un bloque (necesita espacio sobre la cabeza actual para saltar).
                     BlockPos up = level.above();
-                    if (walkable(world, up) && passable(world, cur.above(2))) {
+                    // Solo se salta hasta ~1 bloque: el suelo de arriba no puede estar mas de 1.1 sobre el actual
+                    // (evita 'subirse' a vallas/muros, que miden 1.5, o saltos imposibles desde losas).
+                    if (walkable(world, up) && passable(world, cur.above(2))
+                            && (Double.isNaN(curTop) || standTop(world, up) - curTop <= 1.1)) {
                         relax(cur, up, base + 1.5, destination, cost, parent, closed, open);
                         continue;
                     }
@@ -122,7 +128,7 @@ final class ClonePathfinder {
 
         // Sin camino completo: acercarse todo lo posible (si de verdad se gana terreno).
         if (!best.equals(origin) && bestH < heuristic(origin, destination) - 2.0) {
-            return build(best, origin, parent);
+            return build(world, best, origin, parent);
         }
         return List.of();
     }
@@ -172,10 +178,11 @@ final class ClonePathfinder {
         open.add(new Node(to, newCost + heuristic(to, destination)));
     }
 
-    private static List<Vec3> build(BlockPos end, BlockPos origin, Map<BlockPos, BlockPos> parent) {
+    private static List<Vec3> build(ServerLevel world, BlockPos end, BlockPos origin, Map<BlockPos, BlockPos> parent) {
         ArrayList<Vec3> path = new ArrayList<>();
         for (BlockPos p = end; p != null && !p.equals(origin); p = parent.get(p)) {
-            path.add(new Vec3(p.getX() + .5, p.getY(), p.getZ() + .5));
+            double top = standTop(world, p); // altura real (losas, escaleras...); si no hay dato, la del bloque
+            path.add(new Vec3(p.getX() + .5, Double.isNaN(top) ? p.getY() : top, p.getZ() + .5));
         }
         Collections.reverse(path);
         return path;
@@ -209,18 +216,34 @@ final class ClonePathfinder {
         return s.getCollisionShape(world, p).isEmpty() || isDoor(s);
     }
 
+    /** Espacio para el cuerpo: pies y cabeza libres, y sin nada alto (valla/muro de 1.5) asomando desde abajo. */
     private static boolean clear(ServerLevel world, BlockPos feet) {
-        return passable(world, feet) && passable(world, feet.above());
+        return passable(world, feet) && passable(world, feet.above()) && !tallBelow(world, feet.below());
+    }
+
+    private static boolean tallBelow(ServerLevel world, BlockPos floor) {
+        if (!world.hasChunkAt(floor)) return false;
+        VoxelShape shape = world.getBlockState(floor).getCollisionShape(world, floor);
+        return !shape.isEmpty() && shape.max(Direction.Axis.Y) > 1.0;
     }
 
     private static boolean walkable(ServerLevel world, BlockPos feet) {
-        if (!clear(world, feet)) return false;
+        return clear(world, feet) && !Double.isNaN(standTop(world, feet));
+    }
+
+    /**
+     * Altura absoluta del suelo bajo "feet" (p. ej. y+0.5 sobre una losa), o NaN si no se puede pisar:
+     * sin colision, liquido, peligro, o un bloque de mas de 1 de alto como una valla o un muro.
+     */
+    private static double standTop(ServerLevel world, BlockPos feet) {
         BlockPos floor = feet.below();
-        if (!world.hasChunkAt(floor)) return false;
+        if (!world.hasChunkAt(floor)) return Double.NaN;
         BlockState f = world.getBlockState(floor);
-        return !f.getCollisionShape(world, floor).isEmpty()
-                && world.getFluidState(floor).isEmpty()
-                && !hazard(f);
+        VoxelShape shape = f.getCollisionShape(world, floor);
+        if (shape.isEmpty() || !world.getFluidState(floor).isEmpty() || hazard(f)) return Double.NaN;
+        double top = shape.max(Direction.Axis.Y);
+        if (top > 1.0) return Double.NaN;
+        return floor.getY() + top;
     }
 
     private ClonePathfinder() { }

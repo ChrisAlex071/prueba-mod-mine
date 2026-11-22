@@ -69,6 +69,7 @@ public final class CloneWorker {
     private int stuck;
     private double vy;
     private boolean movedThisTick;
+    private boolean jumpRequested;
     private Vec3 lastPos;
     private final List<BlockPos> route = new ArrayList<>();
     private int routeIndex;
@@ -1242,12 +1243,17 @@ public final class CloneWorker {
             Vec3 now = clone.position();
             double hx = now.x - step.x;
             double hz = now.z - step.z;
-            if (now.distanceToSqr(step) < .65 * .65 || (hx * hx + hz * hz < .3 * .3 && now.y > step.y)) {
+            double h2 = hx * hx + hz * hz;
+            // Se avanza al siguiente punto solo cuando esta casi en el centro del actual: antes se
+            // cortaban esquinas (radio .65) y el cuerpo rozaba vallas, escaleras y muros.
+            if (h2 < .3 * .3 && (Math.abs(now.y - step.y) < 1.3 || now.y > step.y)) {
                 navigationStep++; // llego a este punto (o lo esta sobrevolando en una caida)
                 continue;
             }
             openDoorsAround(step);
-            Walk result = walkToRaw(step, .55);
+            // Si el siguiente punto esta mas alto (escalon, escalera, esquina), saltar con antelacion.
+            if (clone.onGround() && step.y > now.y + 0.45 && h2 < 1.5 * 1.5) jumpRequested = true;
+            Walk result = walkToRaw(step, .3);
             if (result == Walk.ARRIVED) {
                 navigationStep++;
                 continue;
@@ -1343,7 +1349,10 @@ public final class CloneWorker {
         move(dx / dist * SPEED, dz / dist * SPEED);
 
         Vec3 now = clone.position();
-        if (now.distanceToSqr(lastPos) < 0.0004) stuck++; else stuck = 0;
+        double movedX = now.x - lastPos.x;
+        double movedZ = now.z - lastPos.z;
+        // Solo cuenta el avance horizontal: saltar en el sitio contra una valla NO es progresar.
+        if (movedX * movedX + movedZ * movedZ < 0.0004) stuck++; else stuck = 0;
         lastPos = now;
 
         if (stuck > STUCK_LIMIT) {
@@ -1365,10 +1374,11 @@ public final class CloneWorker {
         movedThisTick = true;
         if (clone.onGround()) {
             boolean blocked = clone.horizontalCollision && (mx != 0 || mz != 0);
-            vy = blocked ? 0.42 : -0.05;
+            vy = (blocked || jumpRequested) ? 0.42 : -0.05;
         } else {
             vy = Math.max(vy - 0.08, -1.0);
         }
+        jumpRequested = false;
         clone.move(MoverType.SELF, new Vec3(mx, vy, mz));
     }
 
