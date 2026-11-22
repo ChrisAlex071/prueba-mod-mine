@@ -1,8 +1,10 @@
 package dev.playerclones;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -38,9 +40,9 @@ public final class CloneWorker {
     private enum State { SEARCH, TO_CHEST, TO_VILLAGER, DEPOSIT, PATROL, RETURN_HOME }
     private enum Walk { MOVING, ARRIVED, STUCK }
 
-    private static final int CHEST_RADIUS = 32;
+    private static final int CHEST_RADIUS = 16;
     private static final int CHEST_HEIGHT = 6;
-    private static final int VILLAGER_RADIUS = 64;
+    private static final int VILLAGER_RADIUS = 32;
     private static final int PATROL_VILLAGER_RADIUS = 6;
     private static final double SPEED = 0.2;   // bloques/tick (~caminar)
     private static final double REACH = 2.5;   // distancia para interactuar
@@ -135,9 +137,10 @@ public final class CloneWorker {
         ignoredVillagers.clear();
     }
 
-    public boolean hasTask() { return hasTradeTask() || isSorting(); }
+    public boolean hasTask() { return hasTradeTask() || isSorting() || isHarvesting(); }
     private boolean hasTradeTask() { return give != null && receive != null; }
     private boolean isSorting() { return sortCenter != null; }
+    private boolean isHarvesting() { return harvestCenter != null; }
 
     // ---------------------------------------------------------------- tarea
 
@@ -146,6 +149,8 @@ public final class CloneWorker {
         this.receive = receive;
         this.sortCenter = null;
         this.sortMove = null;
+        this.harvestCenter = null;
+        dropCargo(); // si venia de cosechar, suelta lo que llevaba
         resetPatrol();
         this.targetChest = null;
         this.targetVillager = null;
@@ -162,6 +167,8 @@ public final class CloneWorker {
         receive = null;
         sortCenter = null;
         sortMove = null;
+        harvestCenter = null;
+        harvestTarget = null;
         targetChest = null;
         targetVillager = null;
         resetPatrol();
@@ -172,6 +179,7 @@ public final class CloneWorker {
 
     public String describeTask() {
         if (isSorting()) return "ordenar cofres (radio " + sortRadius + ")";
+        if (isHarvesting()) return "cosechar (radio " + harvestRadius + ")";
         return hasTradeTask()
                 ? "trade " + ItemLookup.shortName(give) + " -> " + ItemLookup.shortName(receive)
                 : "sin tarea";
@@ -184,6 +192,20 @@ public final class CloneWorker {
                     + sortCenter.getZ() + ", radio " + sortRadius + ")"
                     + " | estado: " + sortState.name()
                     + " | items movidos: " + sortMovedTotal
+                    + String.format(" | pos: %.0f %.0f %.0f", p.x, p.y, p.z);
+        }
+        if (isHarvesting()) {
+            StringBuilder lleva = new StringBuilder();
+            for (Map.Entry<Item, Integer> e : cargo.entrySet()) {
+                if (!lleva.isEmpty()) lleva.append(", ");
+                lleva.append(e.getValue()).append("x ").append(ItemLookup.shortName(e.getKey()));
+            }
+            return "tarea: cosechar (centro " + harvestCenter.getX() + " " + harvestCenter.getY() + " "
+                    + harvestCenter.getZ() + ", radio " + harvestRadius + ")"
+                    + " | estado: " + harvestState.name()
+                    + " | cultivos pendientes: " + crops.size()
+                    + " | cosechados en esta ronda: " + harvestedRound
+                    + " | lleva: " + (lleva.isEmpty() ? "nada" : lleva)
                     + String.format(" | pos: %.0f %.0f %.0f", p.x, p.y, p.z);
         }
         String carry = "";
@@ -201,6 +223,7 @@ public final class CloneWorker {
         if (receive != null) dropItems(receive, carriedReceive);
         carriedGive = 0;
         carriedReceive = 0;
+        dropCargo();
         saveState();
     }
 
@@ -227,6 +250,15 @@ public final class CloneWorker {
                 sourceChest = new BlockPos(Integer.parseInt(xyz[0]), Integer.parseInt(xyz[1]), Integer.parseInt(xyz[2]));
             } catch (NumberFormatException ignored) { }
         }
+        String savedHarvest = CloneManager.getTag(clone, "playerclones:harvest=");
+        if (savedHarvest != null) {
+            String[] v = savedHarvest.split(",");
+            if (v.length == 4) try {
+                harvestCenter = new BlockPos(Integer.parseInt(v[0]), Integer.parseInt(v[1]), Integer.parseInt(v[2]));
+                harvestRadius = Math.max(8, Math.min(100, Integer.parseInt(v[3])));
+            } catch (NumberFormatException ignored) { }
+        }
+        loadCargo();
         String savedSort = CloneManager.getTag(clone, "playerclones:sort=");
         if (savedSort != null) {
             String[] v = savedSort.split(",");
@@ -251,6 +283,8 @@ public final class CloneWorker {
     private void saveState() {
         CloneManager.setTag(clone, "playerclones:source=", sourceChest == null ? null :
                 sourceChest.getX() + "," + sourceChest.getY() + "," + sourceChest.getZ());
+        CloneManager.setTag(clone, "playerclones:harvest=", harvestCenter == null ? null :
+                harvestCenter.getX() + "," + harvestCenter.getY() + "," + harvestCenter.getZ() + "," + harvestRadius);
         CloneManager.setTag(clone, "playerclones:sort=", sortCenter == null ? null :
                 sortCenter.getX() + "," + sortCenter.getY() + "," + sortCenter.getZ() + "," + sortRadius);
         CloneManager.setTag(clone, CloneManager.TAG_GIVE, give == null ? null : ItemLookup.fullName(give));
@@ -288,6 +322,8 @@ public final class CloneWorker {
 
         if (isSorting()) {
             sortTick();
+        } else if (isHarvesting()) {
+            harvestTick();
         } else if (hasTradeTask()) {
             if (hasRoute()) {
                 patrolTick();
@@ -711,6 +747,311 @@ public final class CloneWorker {
         return amount;
     }
 
+    // ---------------------------------------------------------------- cosechar
+
+    private enum HarvestState { SCAN, HARVEST, DELIVER }
+
+    private static final int CARGO_MAX_STACKS = 36; // como un inventario de jugador
+
+    private BlockPos harvestCenter;
+    private int harvestRadius = 100;
+    private HarvestState harvestState = HarvestState.SCAN;
+    private CloneHarvester.Scan scan;
+    private List<BlockPos> crops = new ArrayList<>();
+    private List<CloneSorter.Group> farmChests = new ArrayList<>();
+    private BlockPos harvestTarget;
+    private final Map<Item, Integer> cargo = new LinkedHashMap<>();
+    private Item deliverItem;
+    private CloneSorter.Group deliverGroup;
+    private final Set<BlockPos> deliverIgnored = new HashSet<>();
+    private final Set<Item> deliverBlocked = new HashSet<>();
+    private int harvestedRound;
+    private boolean harvestIdleReported;
+    private boolean noChestReported;
+
+    /** Asigna la tarea de cosechar alrededor de la posicion actual del clon. */
+    public void assignHarvest(int radius) {
+        dropCarried(); // si venia de un trueque, suelta lo que llevaba (la carga de cosecha tambien)
+        give = null;
+        receive = null;
+        resetPatrol();
+        targetChest = null;
+        targetVillager = null;
+        sortCenter = null;
+        sortMove = null;
+        harvestCenter = clone.blockPosition();
+        harvestRadius = Math.max(8, Math.min(100, radius));
+        harvestState = HarvestState.SCAN;
+        scan = null;
+        crops = new ArrayList<>();
+        farmChests = new ArrayList<>();
+        harvestTarget = null;
+        deliverItem = null;
+        deliverGroup = null;
+        deliverIgnored.clear();
+        deliverBlocked.clear();
+        harvestedRound = 0;
+        harvestIdleReported = false;
+        noChestReported = false;
+        cooldown = 0;
+        clone.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+        saveState();
+        CloneChunkLoader.refresh(this);
+    }
+
+    private void harvestTick() {
+        if (cooldown > 0) {
+            cooldown--;
+            return;
+        }
+        switch (harvestState) {
+            case SCAN -> harvestScan();
+            case HARVEST -> harvestStep();
+            case DELIVER -> harvestDeliver();
+        }
+    }
+
+    /** Escanea cultivos listos y cofres por tandas (no bloquea el servidor). */
+    private void harvestScan() {
+        if (scan == null) scan = new CloneHarvester.Scan(level(), harvestCenter, harvestRadius);
+        if (!scan.step(25000)) return;
+
+        crops = scan.crops;
+        farmChests = CloneSorter.groupChests(level(), scan.chests);
+        scan = null;
+
+        // Orden de barrido en serpentina por franjas de 8 bloques, empezando por lo mas cercano al clon
+        crops.sort(Comparator.comparingInt((BlockPos p) -> Math.floorDiv(p.getZ(), 8))
+                .thenComparingInt(p -> (Math.floorDiv(p.getZ(), 8) & 1) == 0 ? p.getX() : -p.getX())
+                .thenComparingInt(BlockPos::getZ)
+                .thenComparingInt(BlockPos::getY));
+        if (!crops.isEmpty()) {
+            Vec3 me = clone.position();
+            int nearest = 0;
+            double best = Double.MAX_VALUE;
+            for (int i = 0; i < crops.size(); i++) {
+                BlockPos p = crops.get(i);
+                double dx = p.getX() + .5 - me.x;
+                double dz = p.getZ() + .5 - me.z;
+                double d = dx * dx + dz * dz;
+                if (d < best) {
+                    best = d;
+                    nearest = i;
+                }
+            }
+            Collections.rotate(crops, -nearest);
+        }
+
+        deliverIgnored.clear();
+        deliverBlocked.clear();
+        harvestedRound = 0;
+        harvestTarget = null;
+        harvestState = HarvestState.HARVEST;
+    }
+
+    private void harvestStep() {
+        if (cargoStacks() >= CARGO_MAX_STACKS) {
+            startDelivery();
+            return;
+        }
+        if (harvestTarget == null) {
+            harvestTarget = pickNextCrop();
+            if (harvestTarget == null) { // no quedan cultivos: entregar y terminar la ronda
+                if (!cargo.isEmpty()) {
+                    startDelivery();
+                } else {
+                    finishRound();
+                }
+                return;
+            }
+            resetNavigation();
+        }
+
+        ServerLevel lvl = level();
+        if (!lvl.hasChunkAt(harvestTarget)
+                || !CloneHarvester.isMature(lvl, harvestTarget, lvl.getBlockState(harvestTarget))) {
+            harvestTarget = null; // ya lo cosecho alguien o el chunk se descargo
+            return;
+        }
+        switch (walkToNavigated(Vec3.atBottomCenterOf(harvestTarget))) {
+            case ARRIVED -> {
+                Map<Item, Integer> got = CloneHarvester.harvest(lvl, harvestTarget, clone);
+                clone.swing(InteractionHand.MAIN_HAND);
+                if (got != null) {
+                    for (Map.Entry<Item, Integer> e : got.entrySet()) cargo.merge(e.getKey(), e.getValue(), Integer::sum);
+                    harvestedRound++;
+                    saveCargo();
+                }
+                harvestTarget = null;
+                resetNavigation();
+                cooldown = 3;
+            }
+            case STUCK -> { // inalcanzable: se salta
+                harvestTarget = null;
+                resetNavigation();
+            }
+            default -> { }
+        }
+    }
+
+    /** Siguiente cultivo: el mas cercano entre los primeros de la lista (mantiene el barrido ordenado). */
+    private BlockPos pickNextCrop() {
+        if (crops.isEmpty()) return null;
+        Vec3 me = clone.position();
+        int limit = Math.min(60, crops.size());
+        int best = 0;
+        double bestD = Double.MAX_VALUE;
+        for (int i = 0; i < limit; i++) {
+            BlockPos p = crops.get(i);
+            double dx = p.getX() + .5 - me.x;
+            double dy = p.getY() - me.y;
+            double dz = p.getZ() + .5 - me.z;
+            double d = dx * dx + dy * dy + dz * dz;
+            if (d < bestD) {
+                bestD = d;
+                best = i;
+            }
+        }
+        return crops.remove(best);
+    }
+
+    private void finishRound() {
+        if (harvestedRound > 0) {
+            tell("Ronda terminada: " + harvestedRound + " cultivos cosechados y replantados.");
+            harvestIdleReported = false;
+        } else if (!harvestIdleReported) {
+            tell("No hay cultivos listos en " + harvestRadius + " bloques (solo veo chunks cargados). Vuelvo a mirar en 30 s.");
+            harvestIdleReported = true;
+        }
+        harvestedRound = 0;
+        harvestState = HarvestState.SCAN;
+        scan = null;
+        cooldown = 600; // esperar 30 s a que crezcan mas cultivos
+    }
+
+    private void startDelivery() {
+        harvestState = HarvestState.DELIVER;
+        deliverItem = null;
+        deliverGroup = null;
+        resetNavigation();
+    }
+
+    /** Lleva lo cosechado a un cofre: preferentemente uno que ya tenga ese item. */
+    private void harvestDeliver() {
+        if (cargo.isEmpty()) {
+            endDelivery();
+            return;
+        }
+        if (deliverItem == null || !cargo.containsKey(deliverItem)) {
+            deliverItem = null;
+            for (Item it : cargo.keySet()) {
+                if (!deliverBlocked.contains(it)) {
+                    deliverItem = it;
+                    break;
+                }
+            }
+            if (deliverItem == null) { // todo lo que lleva esta sin cofre disponible
+                if (!noChestReported) {
+                    tell("No encuentro un cofre con espacio para lo que llevo (radio " + harvestRadius
+                            + "). Pon un cofre o vacia uno.");
+                    noChestReported = true;
+                }
+                deliverBlocked.clear();
+                deliverIgnored.clear();
+                if (cargoStacks() >= CARGO_MAX_STACKS) {
+                    cooldown = 200; // carga llena y sin donde dejarla: esperar
+                } else {
+                    endDelivery();  // seguir cosechando y reintentar mas tarde
+                }
+                return;
+            }
+        }
+        if (deliverGroup == null) {
+            deliverGroup = CloneSorter.pickDestination(level(), farmChests, deliverItem,
+                    clone.position(), deliverIgnored);
+            if (deliverGroup == null) {
+                deliverBlocked.add(deliverItem);
+                deliverItem = null;
+                return;
+            }
+            resetNavigation();
+        }
+        BlockPos target = deliverGroup.nearestPart(clone.position());
+        switch (walkToNavigated(Vec3.atBottomCenterOf(target))) {
+            case ARRIVED -> {
+                int amount = cargo.get(deliverItem);
+                int left = CloneSorter.insertInto(level(), deliverGroup, deliverItem, amount);
+                int stored = amount - left;
+                if (left <= 0) cargo.remove(deliverItem); else cargo.put(deliverItem, left);
+                saveCargo();
+                clone.swing(InteractionHand.MAIN_HAND);
+                if (stored > 0) {
+                    tell("Guarde " + stored + "x " + ItemLookup.shortName(deliverItem) + " en un cofre.");
+                    noChestReported = false;
+                } else {
+                    deliverIgnored.add(deliverGroup.anchor); // estaba lleno: probar con otro
+                }
+                deliverGroup = null;
+                resetNavigation();
+                cooldown = 10;
+            }
+            case STUCK -> {
+                deliverIgnored.add(deliverGroup.anchor);
+                deliverGroup = null;
+                resetNavigation();
+            }
+            default -> { }
+        }
+    }
+
+    private void endDelivery() {
+        deliverItem = null;
+        deliverGroup = null;
+        resetNavigation();
+        if (crops.isEmpty() && harvestTarget == null) finishRound(); else harvestState = HarvestState.HARVEST;
+    }
+
+    private int cargoStacks() {
+        int stacks = 0;
+        for (Map.Entry<Item, Integer> e : cargo.entrySet()) {
+            int max = Math.max(1, new ItemStack(e.getKey()).getMaxStackSize());
+            stacks += (e.getValue() + max - 1) / max;
+        }
+        return stacks;
+    }
+
+    // La carga se guarda como "item*cantidad;item*cantidad" en un tag: sobrevive a reinicios sin perder nada.
+    private void saveCargo() {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<Item, Integer> e : cargo.entrySet()) {
+            if (e.getValue() <= 0) continue;
+            if (!sb.isEmpty()) sb.append(';');
+            sb.append(ItemLookup.fullName(e.getKey())).append('*').append(e.getValue());
+        }
+        CloneManager.setTag(clone, "playerclones:cargo=", sb.isEmpty() ? null : sb.toString());
+    }
+
+    private void loadCargo() {
+        cargo.clear();
+        String tag = CloneManager.getTag(clone, "playerclones:cargo=");
+        if (tag == null || tag.isBlank()) return;
+        for (String part : tag.split(";")) {
+            int star = part.lastIndexOf('*');
+            if (star < 0) continue;
+            Item item = ItemLookup.byName(part.substring(0, star));
+            try {
+                int n = Integer.parseInt(part.substring(star + 1));
+                if (item != null && n > 0) cargo.merge(item, n, Integer::sum);
+            } catch (NumberFormatException ignored) { }
+        }
+    }
+
+    private void dropCargo() {
+        for (Map.Entry<Item, Integer> e : cargo.entrySet()) dropItems(e.getKey(), e.getValue());
+        cargo.clear();
+        CloneManager.setTag(clone, "playerclones:cargo=", null);
+    }
+
     // ----------------------------------------------------------- ordenar cofres
 
     private enum SortState { PLAN, TO_SOURCE, TO_DEST }
@@ -733,6 +1074,7 @@ public final class CloneWorker {
         resetPatrol();
         targetChest = null;
         targetVillager = null;
+        harvestCenter = null;
         sortCenter = clone.blockPosition();
         sortRadius = Math.max(4, Math.min(24, radius));
         sortState = SortState.PLAN;

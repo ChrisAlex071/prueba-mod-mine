@@ -127,7 +127,7 @@ final class CloneSorter {
         return false;
     }
 
-    private static boolean hasRoomFor(ServerLevel level, Group g, Item item) {
+    static boolean hasRoomFor(ServerLevel level, Group g, Item item) {
         for (Container c : containers(level, g)) {
             for (int i = 0; i < c.getContainerSize(); i++) {
                 ItemStack s = c.getItem(i);
@@ -261,5 +261,88 @@ final class CloneSorter {
             }
         }
         return stack.isEmpty() ? 0 : stack.getCount();
+    }
+
+    // --------------------------------------------- entrega de cosechas (CloneWorker)
+
+    /** Agrupa posiciones de cofres ya conocidas (une las mitades de los cofres dobles). */
+    static List<Group> groupChests(ServerLevel level, List<BlockPos> positions) {
+        List<Group> groups = new ArrayList<>();
+        Set<BlockPos> seen = new HashSet<>();
+        for (BlockPos pos : positions) {
+            if (seen.contains(pos)) continue;
+            if (!level.hasChunkAt(pos) || !(level.getBlockEntity(pos) instanceof ChestBlockEntity)) continue;
+            List<BlockPos> parts = new ArrayList<>();
+            parts.add(pos);
+            BlockState state = level.getBlockState(pos);
+            if (state.hasProperty(BlockStateProperties.CHEST_TYPE)
+                    && state.getValue(BlockStateProperties.CHEST_TYPE) != ChestType.SINGLE) {
+                BlockPos other = pos.relative(ChestBlock.getConnectedDirection(state));
+                if (level.hasChunkAt(other) && level.getBlockEntity(other) instanceof ChestBlockEntity) {
+                    parts.add(other);
+                }
+            }
+            seen.addAll(parts);
+            BlockPos anchor = parts.get(0);
+            for (BlockPos q : parts) {
+                if (q.asLong() < anchor.asLong()) anchor = q;
+            }
+            groups.add(new Group(anchor, parts));
+        }
+        return groups;
+    }
+
+    private static double distance2(Group g, Vec3 from) {
+        BlockPos p = g.nearestPart(from);
+        double dx = p.getX() + .5 - from.x;
+        double dy = p.getY() + .5 - from.y;
+        double dz = p.getZ() + .5 - from.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    /**
+     * Mejor cofre donde guardar un item: 1) el que ya tiene ese item (con espacio; el que mas tenga),
+     * 2) un cofre vacio, 3) cualquiera con espacio. Ignora los cofres en "ignored".
+     */
+    static Group pickDestination(ServerLevel level, List<Group> groups, Item item, Vec3 from, Set<BlockPos> ignored) {
+        Group sameItem = null;
+        int sameCount = 0;
+        double sameDist = Double.MAX_VALUE;
+        Group empty = null;
+        double emptyDist = Double.MAX_VALUE;
+        Group any = null;
+        double anyDist = Double.MAX_VALUE;
+
+        for (Group g : groups) {
+            if (ignored.contains(g.anchor) || !hasRoomFor(level, g, item)) continue;
+            double d = distance2(g, from);
+            Map<Item, Integer> c = counts(level, g);
+            int n = c.getOrDefault(item, 0);
+            if (n > 0 && (n > sameCount || (n == sameCount && d < sameDist))) {
+                sameItem = g;
+                sameCount = n;
+                sameDist = d;
+            }
+            if (c.isEmpty() && d < emptyDist) {
+                empty = g;
+                emptyDist = d;
+            }
+            if (d < anyDist) {
+                any = g;
+                anyDist = d;
+            }
+        }
+        if (sameItem != null) return sameItem;
+        if (empty != null) return empty;
+        return any;
+    }
+
+    /** Guarda "amount" items en el grupo. Devuelve cuantos NO cupieron. */
+    static int insertInto(ServerLevel level, Group g, Item item, int amount) {
+        List<Container> to = containers(level, g);
+        if (to.isEmpty() || amount <= 0) return amount;
+        int left = insert(to, new ItemStack(item, amount));
+        for (Container d : to) d.setChanged();
+        return left;
     }
 }
